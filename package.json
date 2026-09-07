@@ -1,0 +1,36 @@
+{
+  "name": "@saltcorn/meta-marketing-api",
+  "version": "0.1.0",
+  "description": "Read ads on Facebook and Instagram with the Meta Marketing API",
+  "main": "index.js",
+  "dependencies": {
+    "@saltcorn/markup": "^1.0.0",
+    "@saltcorn/data": "^1.0.0",
+    "node-fetch": "2.6.9"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
+  },
+  "scripts": {
+    "test": "jest tests --runInBand"
+  },
+  "author": "Tom Nielsen",
+  "license": "MIT",
+  "eslintConfig": {
+    "extends": "eslint:recommended",
+    "parserOptions": {
+      "ecmaVersion": 2022
+    },
+    "env": {
+      "node": true,
+      "es6": true,
+      "jest/globals": true
+    },
+    "rules": {
+      "no-unused-vars": "off",
+      "no-case-declarations": "off",
+      "no-empty": "warn",
+      "no-fallthrough": "warn"
+    }
+  }
+}
