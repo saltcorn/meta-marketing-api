@@ -6,6 +6,8 @@ const {
   isTransientError,
   insightsFields,
   DEFAULT_FIELDS,
+  creativeHeadlines,
+  creativeBodies,
 } = require("../api");
 
 describe("query string encoding", () => {
@@ -90,5 +92,112 @@ describe("default fields", () => {
     Object.values(DEFAULT_FIELDS).forEach((fields) => {
       expect(fields).toContain("id");
     });
+  });
+});
+
+describe("finding the headline on a creative", () => {
+  it("reads the headline of a link ad", () => {
+    expect(
+      creativeHeadlines({
+        object_story_spec: {
+          link_data: { name: "Half price today", message: "Primary text" },
+        },
+      })
+    ).toEqual(["Half price today"]);
+  });
+  it("reads the headline of a video ad", () => {
+    expect(
+      creativeHeadlines({ object_story_spec: { video_data: { title: "Watch" } } })
+    ).toEqual(["Watch"]);
+  });
+  it("reads the old style title field", () => {
+    expect(creativeHeadlines({ title: "Legacy headline" })).toEqual([
+      "Legacy headline",
+    ]);
+  });
+  it("returns one headline per carousel card", () => {
+    expect(
+      creativeHeadlines({
+        object_story_spec: {
+          link_data: {
+            name: "Our shop",
+            child_attachments: [{ name: "Shoes" }, { name: "Hats" }],
+          },
+        },
+      })
+    ).toEqual(["Our shop", "Shoes", "Hats"]);
+  });
+  it("returns every headline of a dynamic creative, without repeats", () => {
+    expect(
+      creativeHeadlines({
+        title: "Half price",
+        asset_feed_spec: {
+          titles: [{ text: "Half price" }, { text: "50% off" }],
+        },
+      })
+    ).toEqual(["Half price", "50% off"]);
+  });
+  it("comes back empty when there is no headline to find", () => {
+    expect(creativeHeadlines({ effective_object_story_id: "1_2" })).toEqual([]);
+    expect(creativeHeadlines(null)).toEqual([]);
+  });
+});
+
+describe("finding the primary text on a creative", () => {
+  it("reads the text above the image of a link ad", () => {
+    expect(
+      creativeBodies({
+        object_story_spec: {
+          link_data: { name: "A headline", message: "The longer wording" },
+        },
+      })
+    ).toEqual(["The longer wording"]);
+  });
+  it("reads the text of video, photo and text only ads", () => {
+    expect(
+      creativeBodies({ object_story_spec: { video_data: { message: "Video" } } })
+    ).toEqual(["Video"]);
+    expect(
+      creativeBodies({ object_story_spec: { photo_data: { caption: "Photo" } } })
+    ).toEqual(["Photo"]);
+    expect(
+      creativeBodies({ object_story_spec: { text_data: { message: "Text" } } })
+    ).toEqual(["Text"]);
+  });
+  it("reads the old style body field", () => {
+    expect(creativeBodies({ body: "Legacy body" })).toEqual(["Legacy body"]);
+  });
+  it("returns every primary text of a dynamic creative, without repeats", () => {
+    expect(
+      creativeBodies({
+        body: "Shop the sale",
+        asset_feed_spec: {
+          bodies: [{ text: "Shop the sale" }, { text: "Everything reduced" }],
+        },
+      })
+    ).toEqual(["Shop the sale", "Everything reduced"]);
+  });
+  it("does not mistake the headline for the primary text", () => {
+    const creative = {
+      title: "A headline",
+      object_story_spec: { link_data: { name: "A headline" } },
+    };
+    expect(creativeBodies(creative)).toEqual([]);
+    expect(creativeHeadlines(creative)).toEqual(["A headline"]);
+  });
+  it("comes back empty when there is no text to find", () => {
+    expect(creativeBodies({ effective_object_story_id: "1_2" })).toEqual([]);
+    expect(creativeBodies(null)).toEqual([]);
+  });
+});
+
+describe("default fields", () => {
+  it("asks for the dynamic creative assets", () => {
+    expect(DEFAULT_FIELDS.adcreative).toContain("asset_feed_spec");
+    expect(DEFAULT_FIELDS.adcreative).toContain("effective_object_story_id");
+  });
+  it("asks for both the headline and the primary text", () => {
+    expect(DEFAULT_FIELDS.adcreative).toContain("title");
+    expect(DEFAULT_FIELDS.adcreative).toContain("body");
   });
 });

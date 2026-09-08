@@ -133,6 +133,9 @@ a different token.
 | `get_meta_ad(adId, query)` | One ad |
 | `get_meta_ad_creatives(accountId, query)` | The creatives in an ad account |
 | `get_meta_ad_creative(creativeId, query)` | One creative |
+| `get_meta_ad_headline(ad)` | The headline of an ad, from an ad id or an ad you have already read |
+| `get_meta_ad_body(ad)` | The primary text of an ad: the longer wording above the image |
+| `get_meta_ad_text(ad)` | Both of the above together, as `{ headline, body }`, in one read |
 | `get_meta_ad_preview(adId, adFormat)` | A ready made HTML preview of an ad |
 | `get_meta_insights(objectId, query)` | Performance figures for an account, campaign, ad set or ad |
 | `get_meta_insights_async(objectId, query)` | The same, run as a background report, for large date ranges |
@@ -163,6 +166,21 @@ get_meta_ads("", {
   fields: "id,name,creative{thumbnail_url}"
 })
 ```
+
+The wording of an ad is not in the ad itself, it sits on the creative, and
+Meta keeps it in a different place for each kind of ad. `get_meta_ad_text`
+finds it for you, wherever it is:
+
+```
+get_meta_ad_text(ad_id)
+```
+
+which gives you `{ headline: "...", body: "..." }`, where the body is the
+longer text above the image. For an ad that is boosting a post already on
+your page, the wording belongs to the post rather than to the ad, and reading
+it needs a token that can also read the page. When it cannot be read you get
+empty text back rather than an error; `get_meta_ad_preview` will still show
+you the ad as it appears.
 
 ## Things to know
 

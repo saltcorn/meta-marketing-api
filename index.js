@@ -24,6 +24,9 @@ const {
   getAdCreatives,
   getAdCreative,
   getAdPreview,
+  getAdText,
+  getAdHeadline,
+  getAdBody,
   getInsights,
   getInsightsAsync,
   exchangeLongLivedToken,
@@ -382,6 +385,33 @@ module.exports = {
         { name: "creativeId", type: "String" },
         { name: "query", type: "JSON" },
       ],
+    },
+    get_meta_ad_headline: {
+      async run(ad, cfgOverRide) {
+        return await getAdHeadline(ad, { ...cfg, ...cfgOverRide });
+      },
+      isAsync: true,
+      description:
+        "Get the headline of an ad, wherever Meta keeps it for that kind of ad. Takes an ad id or an ad row that already has its creative.",
+      arguments: [{ name: "ad", type: "String" }],
+    },
+    get_meta_ad_body: {
+      async run(ad, cfgOverRide) {
+        return await getAdBody(ad, { ...cfg, ...cfgOverRide });
+      },
+      isAsync: true,
+      description:
+        "Get the primary text of an ad, the longer wording above the image. Takes an ad id or an ad row that already has its creative.",
+      arguments: [{ name: "ad", type: "String" }],
+    },
+    get_meta_ad_text: {
+      async run(ad, cfgOverRide) {
+        return await getAdText(ad, { ...cfg, ...cfgOverRide });
+      },
+      isAsync: true,
+      description:
+        "Get the headline and the primary text of an ad together, as { headline, body }, in one read",
+      arguments: [{ name: "ad", type: "String" }],
     },
     get_meta_ad_preview: {
       async run(adId, adFormat, cfgOverRide) {

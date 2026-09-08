@@ -91,8 +91,23 @@ const DEFAULT_FIELDS = {
     "call_to_action_type",
     "effective_object_story_id",
     "object_story_spec",
+    "asset_feed_spec",
   ],
 };
+
+// Where the wording of an ad can be found: the headline, and the primary text
+// that runs above the image. Meta puts both in a different place depending on
+// how the ad was built, and nowhere at all on the creative when the ad
+// promotes a post that already exists on the page.
+const CREATIVE_TEXT_FIELDS = [
+  "id",
+  "name",
+  "title",
+  "body",
+  "object_story_spec",
+  "asset_feed_spec",
+  "effective_object_story_id",
+];
 
 // Metrics that are valid at every insights level.
 const BASE_INSIGHTS_FIELDS = [
@@ -420,6 +435,105 @@ const getAdPreview = async (adId, adFormat, cfg) => {
   return json?.data?.[0]?.body || "";
 };
 
+/**
+ * Pull every headline out of a creative, best first. A carousel has one per
+ * card and a dynamic creative can carry several for Meta to choose between,
+ * so this returns a list rather than a single string.
+ */
+const creativeHeadlines = (creative) => {
+  const spec = creative?.object_story_spec || {};
+  const found = [
+    creative?.title,
+    spec.link_data?.name,
+    spec.video_data?.title,
+    spec.template_data?.name,
+    ...(spec.link_data?.child_attachments || []).map((c) => c.name),
+    ...(creative?.asset_feed_spec?.titles || []).map((t) => t.text),
+  ];
+  return [...new Set(found.filter((h) => h))];
+};
+
+/**
+ * Pull every primary text out of a creative, best first. This is the longer
+ * wording that runs above the image, which Meta calls the primary text in Ads
+ * Manager and the body or the message in its API. As with headlines, a
+ * dynamic creative can carry several.
+ */
+const creativeBodies = (creative) => {
+  const spec = creative?.object_story_spec || {};
+  const found = [
+    creative?.body,
+    spec.link_data?.message,
+    spec.video_data?.message,
+    spec.photo_data?.caption,
+    spec.text_data?.message,
+    spec.template_data?.message,
+    ...(creative?.asset_feed_spec?.bodies || []).map((b) => b.text),
+  ];
+  return [...new Set(found.filter((b) => b))];
+};
+
+/**
+ * The wording of the page post an ad promotes: the post's own text, and the
+ * headline of the link it carries.
+ */
+const storyText = async (storyId, cfg) => {
+  const json = await graphFetch(
+    `/${storyId}`,
+    { query: { fields: "message,attachments{title,description}" } },
+    cfg
+  );
+  const attachment = json?.attachments?.data?.[0] || {};
+  return {
+    headline: attachment.title || "",
+    body: json?.message || attachment.description || "",
+  };
+};
+
+/**
+ * The wording of an ad: { headline, body }, where body is the primary text
+ * above the image. Takes an ad id, or an ad that has already been read with
+ * its creative, in which case nothing is read again.
+ *
+ * Ads that promote a post which already exists on the page keep their wording
+ * on the post, which needs a second read and a token with access to the page.
+ * When that read is not allowed the wording comes back empty rather than
+ * throwing.
+ */
+const getAdText = async (ad, cfg) => {
+  let creative = typeof ad === "object" ? ad?.creative : null;
+  if (!creative?.object_story_spec && !creative?.title && !creative?.body) {
+    const fetched = await graphFetch(
+      `/${typeof ad === "object" ? ad?.id : ad}`,
+      { query: { fields: `creative{${CREATIVE_TEXT_FIELDS.join(",")}}` } },
+      cfg
+    );
+    creative = fetched?.creative;
+  }
+  const text = {
+    headline: creativeHeadlines(creative)[0] || "",
+    body: creativeBodies(creative)[0] || "",
+  };
+  if ((!text.headline || !text.body) && creative?.effective_object_story_id)
+    try {
+      const story = await storyText(creative.effective_object_story_id, cfg);
+      return {
+        headline: text.headline || story.headline,
+        body: text.body || story.body,
+      };
+    } catch (e) {
+      if (cfg?.log_requests)
+        console.log("Meta: could not read the post behind the ad", e.message);
+    }
+  return text;
+};
+
+/** The headline of an ad, as getAdText */
+const getAdHeadline = async (ad, cfg) => (await getAdText(ad, cfg)).headline;
+
+/** The primary text of an ad, the wording above the image, as getAdText */
+const getAdBody = async (ad, cfg) => (await getAdText(ad, cfg)).body;
+
 //
 // Insights
 //
@@ -523,6 +637,7 @@ module.exports = {
   GRAPH_HOST,
   DEFAULT_API_VERSION,
   DEFAULT_FIELDS,
+  CREATIVE_TEXT_FIELDS,
   BASE_INSIGHTS_FIELDS,
   INSIGHTS_LEVEL_FIELDS,
   NUMERIC_INSIGHTS_FIELDS,
@@ -551,6 +666,12 @@ module.exports = {
   getAdCreatives,
   getAdCreative,
   getAdPreview,
+  creativeHeadlines,
+  creativeBodies,
+  storyText,
+  getAdText,
+  getAdHeadline,
+  getAdBody,
   getInsights,
   startInsightsReport,
   getReportRun,
