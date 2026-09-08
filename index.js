@@ -41,7 +41,7 @@ const configuration_workflow = () =>
           ctx.app_id,
           ctx.app_secret,
           ctx.access_token,
-          ctx
+          ctx,
         );
         if (res?.access_token)
           return {
@@ -62,7 +62,7 @@ const configuration_workflow = () =>
             blurb: p(
               "Read the ads in your Meta ad accounts. You need an access token with the ",
               "ads_read",
-              " permission, from a Meta app that has access to the ad account. A system user token from Meta Business Manager does not expire and is the easiest to use."
+              " permission, from a Meta app that has access to the ad account. A system user token from Meta Business Manager does not expire and is the easiest to use.",
             ),
             fields: [
               {
@@ -72,6 +72,13 @@ const configuration_workflow = () =>
                 type: "String",
                 fieldview: "textarea",
                 required: true,
+              },
+              {
+                name: "exchange_token",
+                label: "Exchange for a long lived token",
+                sublabel:
+                  "When saving, swap the token above for one that lasts about 60 days. Leave off for system user tokens.",
+                type: "Bool",
               },
               {
                 name: "app_id",
@@ -86,27 +93,14 @@ const configuration_workflow = () =>
                 sublabel: "Optional, as above",
                 type: "String",
               },
-              {
-                name: "exchange_token",
-                label: "Exchange for a long lived token",
-                sublabel:
-                  "When saving, swap the token above for one that lasts about 60 days. Leave off for system user tokens.",
-                type: "Bool",
-              },
+
               {
                 name: "use_appsecret_proof",
                 label: "Send app secret proof",
                 sublabel:
                   "Switch on if your Meta app requires proof of the app secret on API calls",
                 type: "Bool",
-              },
-              {
-                name: "api_version",
-                label: "API version",
-                sublabel: `Graph API version to call. Default ${DEFAULT_API_VERSION}.`,
-                type: "String",
-                default: DEFAULT_API_VERSION,
-              },
+              },              
               {
                 name: "max_pages",
                 label: "Maximum pages",
@@ -153,8 +147,8 @@ const configuration_workflow = () =>
                   "Could not read your ad accounts: ",
                   error,
                   p(
-                    "You can still type an ad account id below, or go back and correct the token."
-                  )
+                    "You can still type an ad account id below, or go back and correct the token.",
+                  ),
                 )
               : undefined,
             fields: [
@@ -434,7 +428,7 @@ module.exports = {
           objectId || cfg?.ad_account_id,
           query,
           { ...cfg, ...cfgOverRide },
-          {}
+          {},
         );
       },
       isAsync: true,
@@ -451,7 +445,7 @@ module.exports = {
           app_id || cfg?.app_id,
           app_secret || cfg?.app_secret,
           access_token || cfg?.access_token,
-          { ...cfg, ...cfgOverRide }
+          { ...cfg, ...cfgOverRide },
         );
       },
       isAsync: true,
@@ -469,7 +463,7 @@ module.exports = {
           access_token || useCfg.access_token,
           useCfg.app_id,
           useCfg.app_secret,
-          useCfg
+          useCfg,
         );
       },
       isAsync: true,
@@ -485,13 +479,13 @@ module.exports = {
       run: async () => {
         if (!cfg?.app_id || !cfg?.app_secret)
           throw new Error(
-            "Set the App ID and App secret in the Meta Marketing API settings to refresh the token"
+            "Set the App ID and App secret in the Meta Marketing API settings to refresh the token",
           );
         const { access_token, expires_in } = await exchangeLongLivedToken(
           cfg.app_id,
           cfg.app_secret,
           cfg.access_token,
-          cfg
+          cfg,
         );
         if (!access_token)
           throw new Error("Meta did not return a new access token");
