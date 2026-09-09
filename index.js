@@ -27,6 +27,10 @@ const {
   getAdText,
   getAdHeadline,
   getAdBody,
+  getAdMedia,
+  getAdMediaType,
+  getAdMediaUrl,
+  getPageAccessToken,
   getInsights,
   getInsightsAsync,
   exchangeLongLivedToken,
@@ -412,6 +416,45 @@ module.exports = {
       description:
         "Get the headline and the primary text of an ad together, as { headline, body }, in one read",
       arguments: [{ name: "ad", type: "String" }],
+    },
+    get_meta_ad_media: {
+      async run(ad, opts, cfgOverRide) {
+        return await getAdMedia(ad, { ...cfg, ...cfgOverRide }, opts || {});
+      },
+      isAsync: true,
+      description:
+        "Get what an ad is made of and where to download it: { type, carousel, media }, where type is image, video, mixed or unknown and each entry in media has a url. Takes an ad id or an ad row that already has its creative. Set resolve_urls false in the options to only work out the type, without reading the address of every file.",
+      arguments: [
+        { name: "ad", type: "String" },
+        { name: "opts", type: "JSON" },
+      ],
+    },
+    get_meta_ad_media_type: {
+      async run(ad, cfgOverRide) {
+        return await getAdMediaType(ad, { ...cfg, ...cfgOverRide });
+      },
+      isAsync: true,
+      description:
+        "Whether an ad is an image, a video, mixed or unknown. Takes an ad id or an ad row that already has its creative.",
+      arguments: [{ name: "ad", type: "String" }],
+    },
+    get_meta_ad_media_url: {
+      async run(ad, cfgOverRide) {
+        return await getAdMediaUrl(ad, { ...cfg, ...cfgOverRide });
+      },
+      isAsync: true,
+      description:
+        "The address of the picture or the film in an ad, ready to download. Video addresses are signed and short lived, so download the file straight away.",
+      arguments: [{ name: "ad", type: "String" }],
+    },
+    get_meta_page_access_token: {
+      async run(pageId, cfgOverRide) {
+        return await getPageAccessToken(pageId, { ...cfg, ...cfgOverRide });
+      },
+      isAsync: true,
+      description:
+        "A token for one of your pages, or nothing when your access token has no say over that page. Use it to check why an ad that boosts a page post shows nothing.",
+      arguments: [{ name: "pageId", type: "String" }],
     },
     get_meta_ad_preview: {
       async run(adId, adFormat, cfgOverRide) {

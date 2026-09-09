@@ -136,6 +136,10 @@ a different token.
 | `get_meta_ad_headline(ad)` | The headline of an ad, from an ad id or an ad you have already read |
 | `get_meta_ad_body(ad)` | The primary text of an ad: the longer wording above the image |
 | `get_meta_ad_text(ad)` | Both of the above together, as `{ headline, body }`, in one read |
+| `get_meta_ad_media(ad, options)` | What an ad is made of and where to download it |
+| `get_meta_ad_media_type(ad)` | Whether an ad is an `image`, a `video`, `mixed` or `unknown` |
+| `get_meta_ad_media_url(ad)` | The address of the picture or the film in an ad |
+| `get_meta_page_access_token(pageId)` | A token for one of your pages, or nothing when you have no access to it |
 | `get_meta_ad_preview(adId, adFormat)` | A ready made HTML preview of an ad |
 | `get_meta_insights(objectId, query)` | Performance figures for an account, campaign, ad set or ad |
 | `get_meta_insights_async(objectId, query)` | The same, run as a background report, for large date ranges |
@@ -177,10 +181,148 @@ get_meta_ad_text(ad_id)
 
 which gives you `{ headline: "...", body: "..." }`, where the body is the
 longer text above the image. For an ad that is boosting a post already on
-your page, the wording belongs to the post rather than to the ad, and reading
-it needs a token that can also read the page. When it cannot be read you get
+your page, the wording belongs to the post rather than to the ad; the module
+asks Meta for a token for that page and reads it with that, which needs the
+access token in the settings to have a say over the page, as described under
+*Ads that boost a post on your page* below. When it cannot be read you get
 empty text back rather than an error; `get_meta_ad_preview` will still show
 you the ad as it appears.
+
+### The picture or the film in an ad
+
+`get_meta_ad_media` tells you what kind of ad you are looking at and where to
+download the file it is built on:
+
+```
+get_meta_ad_media(ad_id)
+```
+
+gives you
+
+```
+{
+  type: "video",
+  carousel: false,
+  media: [
+    {
+      kind: "video",
+      video_id: "1234",
+      url: "https://video.xx.fbcdn.net/...",
+      thumbnail_url: "https://scontent.xx.fbcdn.net/...",
+      permalink_url: "...",
+      length: 15
+    }
+  ],
+  creative_id: "5678",
+  object_type: "VIDEO",
+  thumbnail_url: "https://scontent.xx.fbcdn.net/...",
+  from_post: false,
+  error: undefined
+}
+```
+
+- **type** is `image`, `video`, `mixed` or `unknown`. `mixed` means the ad
+  offers Meta both to choose between, which is what a flexible or dynamic
+  creative does, or a carousel with both in it. `unknown` means there is no
+  picture or film to be found, as on a text only ad.
+- **carousel** says whether the ad holds more than one card. The cards are
+  the entries in `media`, in the order they are shown.
+- **media** has one entry per picture or film, each with a `url` you can
+  download. The still that a film shows before it plays is on that film's
+  entry as `thumbnail_url`, and does not count as a picture of its own. An
+  entry that could not be reached has no `url` and carries an `error` saying
+  why instead.
+- **thumbnail_url** is a picture of the ad as it appears. It is there even
+  when nothing else is, so it is worth keeping as a fallback: for a film it
+  is a still rather than the film itself, which is why it is not in `media`.
+- **from_post** says the ad is boosting a post that was already on your page,
+  so the media was read from the post rather than from the ad.
+- **error** is there only when something could not be read, and says what.
+  An ad never stops a run over an ad set because of it: you get `unknown`
+  and the reason.
+
+### Ads that boost a post on your page
+
+Much of what is advertised on Facebook and Instagram is a post that already
+exists on a page. Such an ad keeps nothing on the creative but the id of the
+page and of the post:
+
+```
+{
+  "object_type": "SHARE",
+  "object_story_spec": { "page_id": "1067...", "instagram_user_id": "1784..." },
+  "effective_object_story_id": "1067..._1334..."
+}
+```
+
+The picture or the film is on the post, and Meta only shows a post to a token
+that carries that page's own permissions. `get_meta_ad_media` asks for a
+token for the page by itself and reads the post with it, so these ads work
+like any other, as long as the access token in the settings has a say over
+the page. That means:
+
+- the token must have the **pages_read_engagement** permission, and
+- the person or system user it belongs to must have a role on that page. In
+  Business Manager, add the page to the same business as the ad account and
+  give the system user access to it.
+
+When that is missing you get `type: "unknown"` and an `error` saying so,
+rather than silence. To check one page on its own:
+
+```
+get_meta_page_access_token("106755536029753")
+```
+
+Nothing back means the token has no say over that page. `thumbnail_url` is
+still filled in for these ads, so you have a picture of the ad to look at
+even when the post itself cannot be read.
+
+A few things are worth knowing before you download:
+
+- **Video addresses are signed and short lived.** Fetch the file as soon as
+  you have the address rather than storing the address for later. Meta only
+  gives the address out to a token that owns the video: with a read only
+  token you may get the video's id and its thumbnail but no `url`, and the
+  entry then carries an `error` saying why. `permalink_url` is a stable
+  address for watching it, not for downloading it.
+- **Working out the type is cheaper than finding the addresses.** Every film
+  costs one extra read to look up. If all you want is image against video,
+  use `get_meta_ad_media_type`, or pass the options `{ resolve_urls: false }`.
+- **Pictures are often named by a hash rather than by an address.** The
+  address is then held by the ad account's own picture library, which is
+  looked up for you, so reading ads of a second ad account works better when
+  you pass that account's id: `get_meta_ad_media(ad, { account_id: "..." })`,
+  or read the ads with `account_id` among the fields. When the library does
+  not hold the picture and the ad boosts a post, the post is read instead.
+- **An ad whose creative shows no media is read again in full.** You may have
+  asked Meta for only some of the places media can hide, so rather than
+  answer `unknown` too readily it asks for all of them. Handing it an ad you
+  read with the creative fields below saves that second read.
+
+To go through a whole ad set:
+
+```
+const ads = await get_meta_adset_ads(adset_id, {
+  fields:
+    "id,name,account_id,creative{id,name,object_type,image_url,image_hash," +
+    "video_id,thumbnail_url,object_story_spec,asset_feed_spec," +
+    "effective_object_story_id}"
+});
+for (const ad of ads) {
+  const { type, media } = await get_meta_ad_media(ad);
+  console.log(ad.name, type, media.map((m) => m.url));
+}
+```
+
+Asking for those creative fields is worth doing on a loop like this: given an
+ad that already carries them, `get_meta_ad_media` works from what you have
+instead of reading each ad again. Given only an ad id, it asks for them
+itself.
+
+Ads read as a table row, or by `get_meta_ads` without a `fields` of your own,
+carry `creative_object_type`. That is a rough answer on its own: most ads
+that link somewhere are reported as `SHARE` whether the media is a picture or
+a film, so use `get_meta_ad_media` when it matters.
 
 ## Things to know
 

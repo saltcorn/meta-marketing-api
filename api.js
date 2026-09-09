@@ -74,7 +74,7 @@ const DEFAULT_FIELDS = {
     "configured_status",
     "bid_amount",
     "preview_shareable_link",
-    "creative{id,name,thumbnail_url}",
+    "creative{id,name,object_type,thumbnail_url,image_url,video_id}",
     "created_time",
     "updated_time",
   ],
@@ -104,6 +104,22 @@ const CREATIVE_TEXT_FIELDS = [
   "name",
   "title",
   "body",
+  "object_story_spec",
+  "asset_feed_spec",
+  "effective_object_story_id",
+];
+
+// Where the picture or the film of an ad can be found. As with the wording,
+// Meta keeps this in a different place depending on how the ad was built.
+const CREATIVE_MEDIA_FIELDS = [
+  "id",
+  "name",
+  "account_id",
+  "object_type",
+  "image_url",
+  "image_hash",
+  "video_id",
+  "thumbnail_url",
   "object_story_spec",
   "asset_feed_spec",
   "effective_object_story_id",
@@ -473,6 +489,53 @@ const creativeBodies = (creative) => {
   return [...new Set(found.filter((b) => b))];
 };
 
+// A page post is only shown to a token that carries the page's own
+// permissions. A token for the page can be asked for, once per page.
+const PAGE_TOKEN_TTL_MS = 15 * 60 * 1000;
+const pageTokenCache = new Map();
+
+/**
+ * A token for one page, from the token in the settings. Comes back null when
+ * the settings token has no say over that page, which is the usual reason an
+ * ad that boosts a page post has nothing to show.
+ */
+const getPageAccessToken = async (pageId, cfg) => {
+  if (!pageId) return null;
+  const key = `${pageId}|${cfg?.access_token || ""}`;
+  const hit = pageTokenCache.get(key);
+  if (hit && Date.now() - hit.at < PAGE_TOKEN_TTL_MS) return hit.token;
+  let token = null;
+  try {
+    const json = await graphFetch(
+      `/${pageId}`,
+      { query: { fields: "access_token" } },
+      cfg
+    );
+    token = json?.access_token || null;
+  } catch (e) {
+    if (cfg?.log_requests)
+      console.log(`Meta: no token for page ${pageId}`, e.message);
+  }
+  pageTokenCache.set(key, { token, at: Date.now() });
+  return token;
+};
+
+/**
+ * Which tokens to try when reading the post behind an ad, best first: one
+ * for the page that owns it, then the one from the settings.
+ */
+const postTokens = async (creative, storyId, cfg, opts = {}) => {
+  const pageId =
+    creative?.object_story_spec?.page_id || `${storyId}`.split("_")[0];
+  const pageToken =
+    opts.page_token === false ? null : await getPageAccessToken(pageId, cfg);
+  return {
+    pageId,
+    pageToken,
+    cfgs: pageToken ? [{ ...cfg, access_token: pageToken }, cfg] : [cfg],
+  };
+};
+
 /**
  * The wording of the page post an ad promotes: the post's own text, and the
  * headline of the link it carries.
@@ -500,7 +563,7 @@ const storyText = async (storyId, cfg) => {
  * When that read is not allowed the wording comes back empty rather than
  * throwing.
  */
-const getAdText = async (ad, cfg) => {
+const getAdText = async (ad, cfg, opts = {}) => {
   let creative = typeof ad === "object" ? ad?.creative : null;
   if (!creative?.object_story_spec && !creative?.title && !creative?.body) {
     const fetched = await graphFetch(
@@ -514,17 +577,21 @@ const getAdText = async (ad, cfg) => {
     headline: creativeHeadlines(creative)[0] || "",
     body: creativeBodies(creative)[0] || "",
   };
-  if ((!text.headline || !text.body) && creative?.effective_object_story_id)
-    try {
-      const story = await storyText(creative.effective_object_story_id, cfg);
-      return {
-        headline: text.headline || story.headline,
-        body: text.body || story.body,
-      };
-    } catch (e) {
-      if (cfg?.log_requests)
-        console.log("Meta: could not read the post behind the ad", e.message);
-    }
+  if ((!text.headline || !text.body) && creative?.effective_object_story_id) {
+    const storyId = creative.effective_object_story_id;
+    const { cfgs } = await postTokens(creative, storyId, cfg, opts);
+    for (const useCfg of cfgs)
+      try {
+        const story = await storyText(storyId, useCfg);
+        return {
+          headline: text.headline || story.headline,
+          body: text.body || story.body,
+        };
+      } catch (e) {
+        if (cfg?.log_requests)
+          console.log("Meta: could not read the post behind the ad", e.message);
+      }
+  }
   return text;
 };
 
@@ -533,6 +600,419 @@ const getAdHeadline = async (ad, cfg) => (await getAdText(ad, cfg)).headline;
 
 /** The primary text of an ad, the wording above the image, as getAdText */
 const getAdBody = async (ad, cfg) => (await getAdText(ad, cfg)).body;
+
+//
+// Media: the picture or the film an ad is built on
+//
+
+// What tells two pieces of media apart. The same picture reached by two
+// routes - once by hash and once by address - is the same picture.
+const MEDIA_IDS = ["video_id", "image_hash", "url"];
+
+/**
+ * Add one piece of media to the list, or, when it is already there under
+ * another of its names, fill in what that entry was missing.
+ */
+const addMedia = (out, m) => {
+  if (!m || !MEDIA_IDS.some((k) => m[k])) return;
+  const same = out.find(
+    (o) => o.kind === m.kind && MEDIA_IDS.some((k) => m[k] && o[k] === m[k])
+  );
+  if (!same) {
+    out.push(m);
+    return;
+  }
+  Object.entries(m).forEach(([k, v]) => {
+    if (v && !same[k]) same[k] = v;
+  });
+};
+
+/** A carousel card, or a plain link ad, which are shaped the same way */
+const linkMedia = (data) =>
+  data.video_id
+    ? {
+        kind: "video",
+        video_id: data.video_id,
+        thumbnail_url: data.picture || data.image_url,
+        image_hash: undefined,
+        thumbnail_hash: data.image_hash,
+        name: data.name,
+        link: data.link,
+      }
+    : {
+        kind: "image",
+        url: data.picture || data.image_url,
+        image_hash: data.image_hash,
+        name: data.name,
+        link: data.link,
+      };
+
+/**
+ * Every piece of media on a creative, without reading anything further. A
+ * video carries its own still as a thumbnail rather than as a picture of its
+ * own, so a film never counts as a picture too.
+ */
+const creativeMedia = (creative) => {
+  const spec = creative?.object_story_spec || {};
+  const feed = creative?.asset_feed_spec || {};
+  const out = [];
+
+  if (spec.video_data)
+    addMedia(out, {
+      kind: "video",
+      video_id: spec.video_data.video_id,
+      thumbnail_url: spec.video_data.image_url,
+      thumbnail_hash: spec.video_data.image_hash,
+      name: spec.video_data.title,
+    });
+  if (spec.photo_data)
+    addMedia(out, {
+      kind: "image",
+      url: spec.photo_data.url,
+      image_hash: spec.photo_data.image_hash,
+    });
+  [spec.link_data, spec.template_data].forEach((data) => {
+    if (!data) return;
+    const children = data.child_attachments || [];
+    if (children.length) children.forEach((c) => addMedia(out, linkMedia(c)));
+    else addMedia(out, linkMedia(data));
+  });
+
+  // Flexible and dynamic creatives keep a pool of assets for Meta to choose
+  // between, rather than one story
+  (feed.videos || []).forEach((v) =>
+    addMedia(out, {
+      kind: "video",
+      video_id: v.video_id,
+      thumbnail_url: v.thumbnail_url,
+      thumbnail_hash: v.thumbnail_hash,
+    })
+  );
+  (feed.images || []).forEach((i) =>
+    addMedia(out, { kind: "image", url: i.url, image_hash: i.hash })
+  );
+
+  // Last, what the creative says about itself. On many ads this is the same
+  // media again, which the key above discards.
+  if (creative?.video_id)
+    addMedia(out, {
+      kind: "video",
+      video_id: creative.video_id,
+      thumbnail_url: creative.thumbnail_url,
+    });
+  else if (creative?.image_url || creative?.image_hash)
+    addMedia(out, {
+      kind: "image",
+      url: creative.image_url,
+      image_hash: creative.image_hash,
+    });
+
+  return out;
+};
+
+/**
+ * The media on a page post an ad promotes, for ads that carry no creative of
+ * their own. An album post holds its pictures one level further down.
+ */
+const storyMedia = async (storyId, cfg) => {
+  const json = await graphFetch(
+    `/${storyId}`,
+    {
+      query: {
+        fields:
+          "permalink_url,full_picture," +
+          "attachments{media_type,media,target,url,subattachments{media_type,media,target}}",
+      },
+    },
+    cfg
+  );
+  const out = [];
+  let album = false;
+  const fromAttachment = (att) => {
+    if (!att) return;
+    const type = `${att.media_type || ""}`.toLowerCase();
+    const still = att.media?.image?.src;
+    if (type.includes("video"))
+      addMedia(out, {
+        kind: "video",
+        video_id: att.target?.id,
+        thumbnail_url: still,
+      });
+    else if (still) addMedia(out, { kind: "image", url: still });
+  };
+  (json?.attachments?.data || []).forEach((att) => {
+    const subs = att.subattachments?.data || [];
+    if (subs.length > 1) album = true;
+    if (subs.length) subs.forEach(fromAttachment);
+    else fromAttachment(att);
+  });
+  // full_picture is whatever the post shows in a feed. For a film that is a
+  // still rather than the film, so it is offered as a thumbnail and never as
+  // a picture in its own right.
+  return {
+    media: out,
+    album,
+    thumbnail_url: json?.full_picture,
+    permalink_url: json?.permalink_url,
+  };
+};
+
+/**
+ * The media on the post an ad boosts, tried first with a token for the page
+ * that owns the post and then with the token from the settings. Never
+ * throws: what went wrong comes back as the reason, to be reported on the ad
+ * rather than stopping a run over a whole ad set.
+ */
+const postMedia = async (creative, cfg, opts = {}) => {
+  const storyId = creative?.effective_object_story_id;
+  if (!storyId) return { media: [] };
+  const { pageId, pageToken, cfgs } = await postTokens(
+    creative,
+    storyId,
+    cfg,
+    opts
+  );
+  let reason;
+  for (const useCfg of cfgs) {
+    try {
+      const post = await storyMedia(storyId, useCfg);
+      if (post.media.length) return { ...post, story_id: storyId };
+      reason = `the post ${storyId} behind this ad carries no picture or film`;
+    } catch (e) {
+      reason = `could not read the post ${storyId} behind this ad: ${e.message}`;
+      if (cfg?.log_requests) console.log(`Meta: ${reason}`);
+    }
+  }
+  if (!pageToken)
+    reason = `${reason}. The access token has no say over page ${pageId}: to see what an ad that boosts a page post is made of, use a token that can also read that page, with the pages_read_engagement permission`;
+  return { media: [], story_id: storyId, error: reason };
+};
+
+/**
+ * Turn the ids and hashes collected above into addresses a file can be
+ * downloaded from. Videos are read one at a time, pictures all in one go.
+ *
+ * The address of a video is only given out to a token that owns it, and it is
+ * signed and short lived, so download it now rather than storing it. When it
+ * cannot be read the entry keeps its id and its thumbnail.
+ */
+const resolveMediaUrls = async (media, accountId, cfg) => {
+  const videos = media.filter((m) => m.kind === "video" && m.video_id);
+  for (const m of videos) {
+    try {
+      const v = await graphFetch(
+        `/${m.video_id}`,
+        {
+          query: {
+            fields: "id,source,picture,permalink_url,length,created_time",
+          },
+        },
+        cfg
+      );
+      m.url = v?.source || m.url;
+      m.thumbnail_url = m.thumbnail_url || v?.picture;
+      m.permalink_url = v?.permalink_url;
+      if (typeof v?.length === "number") m.length = v.length;
+    } catch (e) {
+      m.error = e.message;
+      if (cfg?.log_requests)
+        console.log(`Meta: could not read video ${m.video_id}`, e.message);
+    }
+  }
+
+  const needHash = media.filter((m) => !m.url && m.image_hash);
+  if (!needHash.length) return media;
+  if (!accountId) {
+    needHash.forEach((m) => {
+      m.error =
+        "the address of this picture is held by the ad account, which is not known here: pass the ad account id, or set a default one in the settings";
+    });
+    return media;
+  }
+
+  // The picture library only answers about so many at a time
+  const hashes = [...new Set(needHash.map((m) => m.image_hash))];
+  const byHash = {};
+  let reason;
+  for (let i = 0; i < hashes.length; i += 50) {
+    try {
+      const json = await graphFetch(
+        `/${actId(accountId)}/adimages`,
+        {
+          query: {
+            // a list of its own, not the comma separated kind Meta takes
+            // elsewhere
+            hashes: JSON.stringify(hashes.slice(i, i + 50)),
+            fields: "hash,url,permalink_url,width,height",
+          },
+        },
+        cfg
+      );
+      // Depending on the API version this comes back as a list or as an
+      // object keyed by hash
+      const images = Array.isArray(json?.data)
+        ? json.data
+        : Object.values(json?.images || {});
+      images.forEach((img) => {
+        if (img?.hash) byHash[img.hash] = img;
+      });
+    } catch (e) {
+      reason = `could not read the pictures of ad account ${actId(
+        accountId
+      )}: ${e.message}`;
+      if (cfg?.log_requests) console.log(`Meta: ${reason}`);
+    }
+  }
+  needHash.forEach((m) => {
+    const img = byHash[m.image_hash];
+    if (!img) {
+      m.error =
+        reason ||
+        `the ad account has no picture with the hash ${m.image_hash}. It may belong to another ad account, or to the page rather than to the ad`;
+      return;
+    }
+    m.url = img.url;
+    m.permalink_url = img.permalink_url;
+    m.width = img.width;
+    m.height = img.height;
+  });
+
+  return media;
+};
+
+/**
+ * Why some of what an ad is made of has no address to download it from,
+ * said once rather than once per picture.
+ */
+const mediaErrors = (media) => {
+  const stuck = media.filter((m) => m.error && !m.url);
+  if (!stuck.length) return undefined;
+  const reasons = [...new Set(stuck.map((m) => m.error))];
+  return `${stuck.length} of ${media.length} could not be reached: ${reasons.join(
+    "; "
+  )}`;
+};
+
+/** What kind of ad this is, from the media it was built on */
+const mediaType = (media) => {
+  const hasVideo = media.some((m) => m.kind === "video");
+  const hasImage = media.some((m) => m.kind === "image");
+  if (hasVideo && hasImage) return "mixed";
+  if (hasVideo) return "video";
+  if (hasImage) return "image";
+  return "unknown";
+};
+
+/**
+ * What an ad is made of and where to download it from:
+ *
+ *   { type, carousel, media: [{ kind, url, thumbnail_url, ... }],
+ *     creative_id, object_type, thumbnail_url, from_post, story_id, error }
+ *
+ * type is image, video, mixed - a dynamic creative offering Meta both - or
+ * unknown when nothing could be found. carousel says whether the ad holds
+ * more than one card; the cards are the media list, in the order they are
+ * shown. thumbnail_url is a picture of the ad as it appears, which is there
+ * even when the media itself cannot be reached, and error says why it could
+ * not.
+ *
+ * Takes an ad id, or an ad row that already has its creative. A creative
+ * that carries no media is read again in full, since the caller may have
+ * asked Meta for only some of the places media can hide, so an ad read with
+ * the media fields of its own saves a read here.
+ *
+ * Options: resolve_urls false skips turning video ids and image hashes into
+ * addresses, which saves a read per video when all you want is the type;
+ * page_token false stops it asking for a token for the page behind a boosted
+ * post.
+ */
+const getAdMedia = async (ad, cfg, opts = {}) => {
+  const adId = typeof ad === "object" ? ad?.id : ad;
+  let creative = typeof ad === "object" ? ad?.creative : null;
+  let accountId =
+    opts.account_id ||
+    (typeof ad === "object" ? ad?.account_id : null) ||
+    creative?.account_id;
+  let media = creativeMedia(creative);
+
+  // Nothing on what we were handed. Ask for every field media can arrive in
+  // before giving up on the creative, and for a thumbnail big enough to be
+  // worth looking at.
+  if (!media.length && adId) {
+    const fetched = await graphFetch(
+      `/${adId}`,
+      {
+        query: {
+          fields: `account_id,creative{${CREATIVE_MEDIA_FIELDS.join(",")}}`,
+          thumbnail_width: opts.thumbnail_width || 1200,
+          thumbnail_height: opts.thumbnail_height || 1200,
+        },
+      },
+      cfg
+    );
+    creative = fetched?.creative || creative;
+    accountId = accountId || fetched?.account_id || creative?.account_id;
+    media = creativeMedia(creative);
+  }
+  accountId = accountId || cfg?.ad_account_id;
+
+  // Still nothing: an ad that boosts a post keeps its media on the post
+  let post = {};
+  if (!media.length) {
+    post = await postMedia(creative, cfg, opts);
+    media = post.media;
+  }
+
+  if (opts.resolve_urls !== false) {
+    await resolveMediaUrls(media, accountId, cfg);
+    // Found something, but none of it can be downloaded: a creative can name
+    // pictures the ad account does not hold. The post an ad boosts carries
+    // addresses that work, so it is worth asking after all.
+    if (
+      media.length &&
+      !media.some((m) => m.url) &&
+      !post.media &&
+      creative?.effective_object_story_id
+    ) {
+      const fallback = await postMedia(creative, cfg, opts);
+      await resolveMediaUrls(fallback.media, accountId, cfg);
+      if (fallback.media.some((m) => m.url)) {
+        post = fallback;
+        media = fallback.media;
+      }
+    }
+  }
+
+  const children =
+    creative?.object_story_spec?.link_data?.child_attachments ||
+    creative?.object_story_spec?.template_data?.child_attachments ||
+    [];
+  return {
+    type: mediaType(media),
+    carousel: children.length > 1 || !!post.album,
+    media,
+    creative_id: creative?.id,
+    object_type: creative?.object_type,
+    thumbnail_url: creative?.thumbnail_url || post.thumbnail_url,
+    from_post: !!post.media?.length,
+    story_id: post.story_id,
+    permalink_url: post.permalink_url,
+    error: post.error || mediaErrors(media),
+  };
+};
+
+/** Whether an ad is an image, a video, mixed or unknown, as getAdMedia */
+const getAdMediaType = async (ad, cfg) =>
+  (await getAdMedia(ad, cfg, { resolve_urls: false })).type;
+
+/**
+ * The address of the first picture or film in an ad, ready to download, or
+ * the empty string when there is none
+ */
+const getAdMediaUrl = async (ad, cfg) => {
+  const { media } = await getAdMedia(ad, cfg);
+  return media.find((m) => m.url)?.url || "";
+};
 
 //
 // Insights
@@ -638,6 +1118,7 @@ module.exports = {
   DEFAULT_API_VERSION,
   DEFAULT_FIELDS,
   CREATIVE_TEXT_FIELDS,
+  CREATIVE_MEDIA_FIELDS,
   BASE_INSIGHTS_FIELDS,
   INSIGHTS_LEVEL_FIELDS,
   NUMERIC_INSIGHTS_FIELDS,
@@ -672,6 +1153,16 @@ module.exports = {
   getAdText,
   getAdHeadline,
   getAdBody,
+  creativeMedia,
+  storyMedia,
+  postMedia,
+  postTokens,
+  getPageAccessToken,
+  mediaErrors,
+  mediaType,
+  getAdMedia,
+  getAdMediaType,
+  getAdMediaUrl,
   getInsights,
   startInsightsReport,
   getReportRun,

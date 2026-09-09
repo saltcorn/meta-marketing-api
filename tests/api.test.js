@@ -8,6 +8,8 @@ const {
   DEFAULT_FIELDS,
   creativeHeadlines,
   creativeBodies,
+  creativeMedia,
+  mediaType,
 } = require("../api");
 
 describe("query string encoding", () => {
@@ -199,5 +201,117 @@ describe("default fields", () => {
   it("asks for both the headline and the primary text", () => {
     expect(DEFAULT_FIELDS.adcreative).toContain("title");
     expect(DEFAULT_FIELDS.adcreative).toContain("body");
+  });
+});
+
+describe("finding the media on a creative", () => {
+  it("reads the film of a video ad, with its still as the thumbnail", () => {
+    const media = creativeMedia({
+      video_id: "77",
+      object_story_spec: {
+        video_data: {
+          video_id: "77",
+          title: "Watch",
+          image_url: "https://example.com/still.jpg",
+          image_hash: "abc",
+        },
+      },
+    });
+    expect(media).toEqual([
+      {
+        kind: "video",
+        video_id: "77",
+        thumbnail_url: "https://example.com/still.jpg",
+        thumbnail_hash: "abc",
+        name: "Watch",
+      },
+    ]);
+    // the still of a film is not a picture of its own
+    expect(mediaType(media)).toBe("video");
+  });
+  it("reads the picture of a link ad", () => {
+    const media = creativeMedia({
+      object_story_spec: {
+        link_data: {
+          name: "Half price",
+          image_hash: "hash1",
+          picture: "https://example.com/pic.jpg",
+          link: "https://example.com",
+        },
+      },
+    });
+    expect(media).toEqual([
+      {
+        kind: "image",
+        url: "https://example.com/pic.jpg",
+        image_hash: "hash1",
+        name: "Half price",
+        link: "https://example.com",
+      },
+    ]);
+    expect(mediaType(media)).toBe("image");
+  });
+  it("reads a photo ad", () => {
+    expect(
+      creativeMedia({
+        object_story_spec: {
+          photo_data: { url: "https://example.com/photo.jpg", image_hash: "h" },
+        },
+      })
+    ).toEqual([
+      { kind: "image", url: "https://example.com/photo.jpg", image_hash: "h" },
+    ]);
+  });
+  it("returns one entry per carousel card, in order", () => {
+    const media = creativeMedia({
+      object_story_spec: {
+        link_data: {
+          image_hash: "cover",
+          child_attachments: [
+            { image_hash: "h1", name: "Shoes" },
+            { video_id: "v2", name: "Hats", picture: "https://x/2.jpg" },
+          ],
+        },
+      },
+    });
+    expect(media.map((m) => m.kind)).toEqual(["image", "video"]);
+    expect(media.map((m) => m.name)).toEqual(["Shoes", "Hats"]);
+    // a carousel with a film in it counts as a mixed ad
+    expect(mediaType(media)).toBe("mixed");
+  });
+  it("reads the assets of a dynamic creative, without repeats", () => {
+    const media = creativeMedia({
+      image_url: "https://example.com/a.jpg",
+      asset_feed_spec: {
+        images: [{ hash: "h1", url: "https://example.com/a.jpg" }],
+        videos: [{ video_id: "v1", thumbnail_url: "https://example.com/t.jpg" }],
+      },
+    });
+    expect(media).toHaveLength(2);
+    expect(mediaType(media)).toBe("mixed");
+  });
+  it("does not repeat the same picture reached by two routes", () => {
+    const media = creativeMedia({
+      image_hash: "h1",
+      image_url: "https://example.com/a.jpg",
+      object_story_spec: {
+        link_data: { image_hash: "h1", picture: "https://example.com/a.jpg" },
+      },
+    });
+    expect(media).toHaveLength(1);
+  });
+  it("comes back empty for an ad that promotes an existing post", () => {
+    expect(creativeMedia({ effective_object_story_id: "1_2" })).toEqual([]);
+    expect(creativeMedia(null)).toEqual([]);
+    expect(mediaType([])).toBe("unknown");
+  });
+});
+
+describe("default fields", () => {
+  it("asks what kind of ad each ad is", () => {
+    const creative = DEFAULT_FIELDS.ad.find((f) => f.startsWith("creative{"));
+    expect(creative).toContain("object_type");
+    expect(creative).toContain("video_id");
+    expect(creative).toContain("image_url");
   });
 });
