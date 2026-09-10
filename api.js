@@ -242,7 +242,7 @@ const mkApiError = (error, status) => {
   const e = new Error(
     `Meta Marketing API error (${bits.join(", ")}): ${
       error?.error_user_msg || error?.message || "unknown error"
-    }`
+    }`,
   );
   e.metaError = error;
   e.status = status;
@@ -282,8 +282,7 @@ const graphFetch = async (path, opts = {}, cfg = {}) => {
   if (!noAuth && cfg?.access_token)
     headers.Authorization = `Bearer ${cfg.access_token}`;
 
-  const maxRetries =
-    typeof cfg?.max_retries === "number" ? cfg.max_retries : 3;
+  const maxRetries = typeof cfg?.max_retries === "number" ? cfg.max_retries : 3;
   let attempt = 0;
 
   for (;;) {
@@ -301,10 +300,10 @@ const graphFetch = async (path, opts = {}, cfg = {}) => {
       }
       console.error(
         `Meta Marketing API non-JSON response (HTTP ${response.status})`,
-        body
+        body,
       );
       throw new Error(
-        `Meta Marketing API: not a JSON response (HTTP ${response.status})`
+        `Meta Marketing API: not a JSON response (HTTP ${response.status})`,
       );
     }
     if (json && json.error) {
@@ -334,6 +333,8 @@ const getAllPages = async (path, query, cfg = {}, opts = {}) => {
   const rows = [...(json?.data || [])];
   let pages = 1;
   while (json?.paging?.next && pages < maxPages) {
+    if (cfg?.page_delay)
+      await new Promise((resolve) => setTimeout(resolve, cfg?.page_delay));
     json = await graphFetch(json.paging.next, {}, cfg);
     rows.push(...(json?.data || []));
     pages += 1;
@@ -358,7 +359,11 @@ const withInsightsFields = (query) => {
 //
 
 const getMe = async (query, cfg) =>
-  await graphFetch("/me", { query: { fields: "id,name", ...(query || {}) } }, cfg);
+  await graphFetch(
+    "/me",
+    { query: { fields: "id,name", ...(query || {}) } },
+    cfg,
+  );
 
 const getAdAccounts = async (query, cfg) =>
   await getAllPages("/me/adaccounts", withFields(query, "adaccount"), cfg);
@@ -367,7 +372,7 @@ const getAdAccount = async (accountId, query, cfg) =>
   await graphFetch(
     `/${actId(accountId)}`,
     { query: withFields(query, "adaccount") },
-    cfg
+    cfg,
   );
 
 const getBusinesses = async (query, cfg) =>
@@ -377,7 +382,7 @@ const getBusinessAdAccounts = async (businessId, query, cfg) =>
   await getAllPages(
     `/${businessId}/owned_ad_accounts`,
     withFields(query, "adaccount"),
-    cfg
+    cfg,
   );
 
 //
@@ -388,29 +393,25 @@ const getCampaigns = async (accountId, query, cfg) =>
   await getAllPages(
     `/${actId(accountId)}/campaigns`,
     withFields(query, "campaign"),
-    cfg
+    cfg,
   );
 
 const getCampaign = async (campaignId, query, cfg) =>
   await graphFetch(
     `/${campaignId}`,
     { query: withFields(query, "campaign") },
-    cfg
+    cfg,
   );
 
 const getAdSets = async (accountId, query, cfg) =>
   await getAllPages(
     `/${actId(accountId)}/adsets`,
     withFields(query, "adset"),
-    cfg
+    cfg,
   );
 
 const getCampaignAdSets = async (campaignId, query, cfg) =>
-  await getAllPages(
-    `/${campaignId}/adsets`,
-    withFields(query, "adset"),
-    cfg
-  );
+  await getAllPages(`/${campaignId}/adsets`, withFields(query, "adset"), cfg);
 
 const getAdSet = async (adSetId, query, cfg) =>
   await graphFetch(`/${adSetId}`, { query: withFields(query, "adset") }, cfg);
@@ -431,14 +432,14 @@ const getAdCreatives = async (accountId, query, cfg) =>
   await getAllPages(
     `/${actId(accountId)}/adcreatives`,
     withFields(query, "adcreative"),
-    cfg
+    cfg,
   );
 
 const getAdCreative = async (creativeId, query, cfg) =>
   await graphFetch(
     `/${creativeId}`,
     { query: withFields(query, "adcreative") },
-    cfg
+    cfg,
   );
 
 /** Rendered HTML preview of an ad, as an iframe snippet */
@@ -446,7 +447,7 @@ const getAdPreview = async (adId, adFormat, cfg) => {
   const json = await graphFetch(
     `/${adId}/previews`,
     { query: { ad_format: adFormat || "DESKTOP_FEED_STANDARD" } },
-    cfg
+    cfg,
   );
   return json?.data?.[0]?.body || "";
 };
@@ -509,7 +510,7 @@ const getPageAccessToken = async (pageId, cfg) => {
     const json = await graphFetch(
       `/${pageId}`,
       { query: { fields: "access_token" } },
-      cfg
+      cfg,
     );
     token = json?.access_token || null;
   } catch (e) {
@@ -544,7 +545,7 @@ const storyText = async (storyId, cfg) => {
   const json = await graphFetch(
     `/${storyId}`,
     { query: { fields: "message,attachments{title,description}" } },
-    cfg
+    cfg,
   );
   const attachment = json?.attachments?.data?.[0] || {};
   return {
@@ -569,7 +570,7 @@ const getAdText = async (ad, cfg, opts = {}) => {
     const fetched = await graphFetch(
       `/${typeof ad === "object" ? ad?.id : ad}`,
       { query: { fields: `creative{${CREATIVE_TEXT_FIELDS.join(",")}}` } },
-      cfg
+      cfg,
     );
     creative = fetched?.creative;
   }
@@ -616,7 +617,7 @@ const MEDIA_IDS = ["video_id", "image_hash", "url"];
 const addMedia = (out, m) => {
   if (!m || !MEDIA_IDS.some((k) => m[k])) return;
   const same = out.find(
-    (o) => o.kind === m.kind && MEDIA_IDS.some((k) => m[k] && o[k] === m[k])
+    (o) => o.kind === m.kind && MEDIA_IDS.some((k) => m[k] && o[k] === m[k]),
   );
   if (!same) {
     out.push(m);
@@ -686,10 +687,10 @@ const creativeMedia = (creative) => {
       video_id: v.video_id,
       thumbnail_url: v.thumbnail_url,
       thumbnail_hash: v.thumbnail_hash,
-    })
+    }),
   );
   (feed.images || []).forEach((i) =>
-    addMedia(out, { kind: "image", url: i.url, image_hash: i.hash })
+    addMedia(out, { kind: "image", url: i.url, image_hash: i.hash }),
   );
 
   // Last, what the creative says about itself. On many ads this is the same
@@ -724,7 +725,7 @@ const storyMedia = async (storyId, cfg) => {
           "attachments{media_type,media,target,url,subattachments{media_type,media,target}}",
       },
     },
-    cfg
+    cfg,
   );
   const out = [];
   let album = false;
@@ -770,7 +771,7 @@ const postMedia = async (creative, cfg, opts = {}) => {
     creative,
     storyId,
     cfg,
-    opts
+    opts,
   );
   let reason;
   for (const useCfg of cfgs) {
@@ -807,7 +808,7 @@ const resolveMediaUrls = async (media, accountId, cfg) => {
             fields: "id,source,picture,permalink_url,length,created_time",
           },
         },
-        cfg
+        cfg,
       );
       m.url = v?.source || m.url;
       m.thumbnail_url = m.thumbnail_url || v?.picture;
@@ -846,7 +847,7 @@ const resolveMediaUrls = async (media, accountId, cfg) => {
             fields: "hash,url,permalink_url,width,height",
           },
         },
-        cfg
+        cfg,
       );
       // Depending on the API version this comes back as a list or as an
       // object keyed by hash
@@ -858,7 +859,7 @@ const resolveMediaUrls = async (media, accountId, cfg) => {
       });
     } catch (e) {
       reason = `could not read the pictures of ad account ${actId(
-        accountId
+        accountId,
       )}: ${e.message}`;
       if (cfg?.log_requests) console.log(`Meta: ${reason}`);
     }
@@ -889,7 +890,7 @@ const mediaErrors = (media) => {
   if (!stuck.length) return undefined;
   const reasons = [...new Set(stuck.map((m) => m.error))];
   return `${stuck.length} of ${media.length} could not be reached: ${reasons.join(
-    "; "
+    "; ",
   )}`;
 };
 
@@ -948,7 +949,7 @@ const getAdMedia = async (ad, cfg, opts = {}) => {
           thumbnail_height: opts.thumbnail_height || 1200,
         },
       },
-      cfg
+      cfg,
     );
     creative = fetched?.creative || creative;
     accountId = accountId || fetched?.account_id || creative?.account_id;
@@ -1023,7 +1024,7 @@ const getInsights = async (objectId, query, cfg, opts) =>
     `/${objectId}/insights`,
     withInsightsFields(query),
     cfg,
-    opts
+    opts,
   );
 
 /** Kick off an asynchronous insights job, returns { report_run_id } */
@@ -1031,7 +1032,7 @@ const startInsightsReport = async (objectId, query, cfg) =>
   await graphFetch(
     `/${objectId}/insights`,
     { method: "POST", query: withInsightsFields(query) },
-    cfg
+    cfg,
   );
 
 const getReportRun = async (reportRunId, cfg) =>
@@ -1039,11 +1040,10 @@ const getReportRun = async (reportRunId, cfg) =>
     `/${reportRunId}`,
     {
       query: {
-        fields:
-          "id,async_status,async_percent_completion,date_start,date_stop",
+        fields: "id,async_status,async_percent_completion,date_start,date_stop",
       },
     },
-    cfg
+    cfg,
   );
 
 const getReportRunInsights = async (reportRunId, query, cfg, opts) =>
@@ -1066,11 +1066,11 @@ const getInsightsAsync = async (objectId, query, cfg, opts = {}) => {
     if (run?.async_status === "Job Completed") break;
     if (["Job Failed", "Job Skipped"].includes(run?.async_status))
       throw new Error(
-        `Meta Marketing API: insights job ${run.async_status} (${report_run_id})`
+        `Meta Marketing API: insights job ${run.async_status} (${report_run_id})`,
       );
     if (Date.now() - startedAt > timeout)
       throw new Error(
-        `Meta Marketing API: insights job timed out (${report_run_id})`
+        `Meta Marketing API: insights job timed out (${report_run_id})`,
       );
     await sleep(pollInterval);
   }
@@ -1094,7 +1094,7 @@ const exchangeLongLivedToken = async (app_id, app_secret, access_token, cfg) =>
         fb_exchange_token: access_token,
       },
     },
-    cfg
+    cfg,
   );
 
 /** Inspect a token: which app it belongs to, when it expires, its scopes */
@@ -1108,7 +1108,7 @@ const debugToken = async (token, app_id, app_secret, cfg) => {
         access_token: `${app_id}|${app_secret}`,
       },
     },
-    cfg
+    cfg,
   );
   return json?.data || json;
 };
