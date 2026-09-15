@@ -713,8 +713,8 @@ const rankMedia = (media, creative) => {
   const thumb = fileName(creative?.thumbnail_url);
   const rank = (m) => {
     if (!m.placements) return 4;
+    if (m.feed) return 0;
     if (m.fallback) return 3;
-    if (m.placements.some((p) => MAIN_PLACEMENTS.includes(p))) return 0;
     if (thumb && [m.url, m.thumbnail_url].some((u) => u && fileName(u) === thumb))
       return 1;
     return 2;
@@ -777,6 +777,15 @@ const creativeMedia = (creative) => {
   (feed.images || []).forEach((i) =>
     addAsset(i, { kind: "image", url: i.url, image_hash: i.hash }),
   );
+  if (rules.length) {
+    // The feed shows what a rule for the feed names, and when no rule names
+    // the feed, the catch-all
+    const inFeed = (m) => m.placements.some((p) => MAIN_PLACEMENTS.includes(p));
+    const feedRule = out.some((m) => m.placements && inFeed(m));
+    out.forEach((m) => {
+      if (m.placements) m.feed = feedRule ? inFeed(m) : !!m.fallback;
+    });
+  }
 
   // Last, what the creative says about itself. On many ads this is the same
   // media again, which the key above discards.
@@ -882,28 +891,54 @@ const postMedia = async (creative, cfg, opts = {}) => {
  * signed and short lived, so download it now rather than storing it. When it
  * cannot be read the entry keeps its id and its thumbnail.
  */
-const resolveMediaUrls = async (media, accountId, cfg) => {
+const resolveMediaUrls = async (media, accountId, cfg, opts = {}) => {
   const videos = media.filter((m) => m.kind === "video" && m.video_id);
-  for (const m of videos) {
-    try {
-      const v = await graphFetch(
-        `/${m.video_id}`,
-        {
-          query: {
-            fields: "id,source,picture,permalink_url,length,created_time",
-          },
+  const readVideo = (m, useCfg) =>
+    graphFetch(
+      `/${m.video_id}`,
+      {
+        query: {
+          fields: "id,source,picture,permalink_url,length,created_time",
         },
-        cfg,
-      );
-      m.url = v?.source || m.url;
-      m.thumbnail_url = m.thumbnail_url || v?.picture;
-      m.permalink_url = v?.permalink_url;
-      if (typeof v?.length === "number") m.length = v.length;
-    } catch (e) {
-      m.error = e.message;
-      if (cfg?.log_requests)
-        console.log(`Meta: could not read video ${m.video_id}`, e.message);
+      },
+      useCfg,
+    );
+  // A film uploaded to the page rather than to the ad account is only given
+  // out to a token for that page, looked up once and only when needed
+  let pageCfg;
+  const forPage = async () => {
+    if (pageCfg === undefined) {
+      const token =
+        opts.pageId && opts.page_token !== false
+          ? await getPageAccessToken(opts.pageId, cfg)
+          : null;
+      pageCfg = token ? { ...cfg, access_token: token } : null;
     }
+    return pageCfg;
+  };
+  for (const m of videos) {
+    let v;
+    try {
+      v = await readVideo(m, cfg);
+    } catch (e) {
+      const useCfg = await forPage();
+      try {
+        if (!useCfg) throw e;
+        v = await readVideo(m, useCfg);
+      } catch (e2) {
+        m.error =
+          useCfg || !opts.pageId || opts.page_token === false
+            ? e2.message
+            : `${e.message}. The film may belong to page ${opts.pageId}, which the access token has no say over: a token that can also read that page, with the pages_read_engagement permission, can download it`;
+        if (cfg?.log_requests)
+          console.log(`Meta: could not read video ${m.video_id}`, m.error);
+        continue;
+      }
+    }
+    m.url = v?.source || m.url;
+    m.thumbnail_url = m.thumbnail_url || v?.picture;
+    m.permalink_url = v?.permalink_url;
+    if (typeof v?.length === "number") m.length = v.length;
   }
 
   const needHash = media.filter((m) => !m.url && m.image_hash);
@@ -966,6 +1001,119 @@ const resolveMediaUrls = async (media, accountId, cfg) => {
   return media;
 };
 
+// The preview that shows a film in each of its placements
+const PREVIEW_FORMATS = {
+  "facebook:feed": "MOBILE_FEED_STANDARD",
+  "instagram:stream": "INSTAGRAM_STANDARD",
+  "facebook:marketplace": "MARKETPLACE_MOBILE",
+  "facebook:story": "FACEBOOK_STORY_MOBILE",
+  "instagram:story": "INSTAGRAM_STORY",
+  "facebook:facebook_reels": "FACEBOOK_REELS_MOBILE",
+  "instagram:reels": "INSTAGRAM_REELS",
+  facebook: "MOBILE_FEED_STANDARD",
+  instagram: "INSTAGRAM_STANDARD",
+};
+
+/** The previews worth looking in for one film, best first, at most three */
+const previewFormats = (m) =>
+  [
+    ...new Set([
+      ...(m.feed || !m.placements?.length
+        ? ["MOBILE_FEED_STANDARD", "INSTAGRAM_STANDARD"]
+        : []),
+      ...(m.placements || []).map((p) => PREVIEW_FORMATS[p]).filter(Boolean),
+    ]),
+  ].slice(0, 3);
+
+/** Undo the escaping a preview wraps its addresses in */
+const unescapePreview = (html) =>
+  html
+    .replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) =>
+      String.fromCharCode(parseInt(hex, 16)),
+    )
+    .replace(/\\\//g, "/")
+    .replace(/&amp;/g, "&");
+
+/**
+ * What the address of a film in a preview says about the file behind it:
+ * which film it is, how long, and whether it is a whole file rather than a
+ * piece of a stream, and at what size
+ */
+const previewFile = (url) => {
+  let efg = {};
+  try {
+    const raw = new URL(url).searchParams.get("efg") || "";
+    efg = JSON.parse(
+      Buffer.from(raw.replace(/ /g, "+"), "base64").toString(),
+    );
+  } catch (e) {}
+  const tag = `${efg.vencode_tag || ""}`;
+  return {
+    url,
+    asset: efg.xpv_asset_id,
+    length: efg.duration_s,
+    progressive: !tag || tag.includes("progressive"),
+    size: +(tag.match(/(\d{3,4})p\b/) || tag.match(/\.(\d{3,4})\./) || [])[1] || 0,
+  };
+};
+
+/**
+ * The page Meta draws one preview of an ad in, and the whole film files it
+ * plays. This is the page Ads Manager shows, not a documented part of the
+ * API, so it may change without notice.
+ */
+const previewPage = async (adId, format, cfg) => {
+  const body = await getAdPreview(adId, format, cfg);
+  const src = body.match(/src="([^"]+)"/)?.[1];
+  if (!src) return { html: "", files: [] };
+  const response = await fetch(src.replace(/&amp;/g, "&"), {
+    headers: { "User-Agent": "Mozilla/5.0" },
+  });
+  if (response.status !== 200)
+    throw new Error(`the preview answered with status ${response.status}`);
+  const html = unescapePreview(await response.text());
+  const urls = [
+    ...new Set(html.match(/https:\/\/[^"'\s\\<>]+?\.mp4[^"'\s\\<>]*/g) || []),
+  ];
+  return { html, files: urls.map(previewFile).filter((f) => f.progressive) };
+};
+
+/**
+ * Films whose address Meta will not give out still play in the ad's preview.
+ * Each is looked for in the preview of a placement it is shown in, and only
+ * taken from a preview that plays one film, and, when the ad has several,
+ * shows this one's still. The largest whole file wins. A catch-all that no
+ * one sees is not worth the reads.
+ */
+const previewVideoUrls = async (media, adId, cfg) => {
+  const videos = media.filter((m) => m.kind === "video");
+  const missing = videos.filter((m) => !m.url && !(m.fallback && !m.feed));
+  const pages = {};
+  for (const m of missing) {
+    const still = fileName(m.thumbnail_url);
+    for (const format of previewFormats(m)) {
+      if (!pages[format])
+        pages[format] = await previewPage(adId, format, cfg).catch((e) => {
+          if (cfg?.log_requests)
+            console.log(`Meta: could not read the ${format} preview of ad ${adId}`, e.message);
+          return { html: "", files: [] };
+        });
+      const { html, files } = pages[format];
+      if (!files.length || new Set(files.map((f) => f.asset)).size > 1) continue;
+      if (videos.length > 1 && !(still && html.includes(still))) continue;
+      const best = files.reduce((a, b) => (b.size > a.size ? b : a));
+      m.url = best.url;
+      m.url_from = "preview";
+      m.preview_format = format;
+      if (typeof m.length !== "number" && typeof best.length === "number")
+        m.length = best.length;
+      delete m.error;
+      break;
+    }
+  }
+  return media;
+};
+
 /**
  * Why some of what an ad is made of has no address to download it from,
  * said once rather than once per picture.
@@ -973,9 +1121,10 @@ const resolveMediaUrls = async (media, accountId, cfg) => {
 const mediaErrors = (media) => {
   // A catch-all that cannot be reached does not matter while what the ad
   // shows can be
-  const shownReached = media.some((m) => m.url && !m.fallback);
+  const unseen = (m) => m.fallback && !m.feed;
+  const shownReached = media.some((m) => m.url && !unseen(m));
   const stuck = media.filter(
-    (m) => m.error && !m.url && !(m.fallback && shownReached),
+    (m) => m.error && !m.url && !(unseen(m) && shownReached),
   );
   if (!stuck.length) return undefined;
   const reasons = [...new Set(stuck.map((m) => m.error))];
@@ -987,8 +1136,9 @@ const mediaErrors = (media) => {
 /** What kind of ad this is, from the media it was built on */
 const mediaType = (media) => {
   // The catch-all of a creative customised by placement only fills the
-  // placements its other rules leave over, which is not what the ad is
-  const shown = media.filter((m) => !m.fallback);
+  // placements its other rules leave over, which is not what the ad is,
+  // unless one of those is the feed
+  const shown = media.filter((m) => !m.fallback || m.feed);
   const pool = shown.length ? shown : media;
   const hasVideo = pool.some((m) => m.kind === "video");
   const hasImage = pool.some((m) => m.kind === "image");
@@ -1019,7 +1169,8 @@ const mediaType = (media) => {
  * Options: resolve_urls false skips turning video ids and image hashes into
  * addresses, which saves a read per video when all you want is the type;
  * page_token false stops it asking for a token for the page behind a boosted
- * post.
+ * post or a film; preview_video_urls false stops it looking for the address
+ * of a film in the ad's preview when no token is given it.
  */
 const getAdMedia = async (ad, cfg, opts = {}) => {
   const adId = typeof ad === "object" ? ad?.id : ad;
@@ -1059,7 +1210,13 @@ const getAdMedia = async (ad, cfg, opts = {}) => {
   }
 
   if (opts.resolve_urls !== false) {
-    await resolveMediaUrls(media, accountId, cfg);
+    const urlOpts = {
+      pageId:
+        creative?.object_story_spec?.page_id ||
+        `${creative?.effective_object_story_id || ""}`.split("_")[0],
+      page_token: opts.page_token,
+    };
+    await resolveMediaUrls(media, accountId, cfg, urlOpts);
     // Found something, but none of it can be downloaded: a creative can name
     // pictures the ad account does not hold. The post an ad boosts carries
     // addresses that work, so it is worth asking after all.
@@ -1070,12 +1227,15 @@ const getAdMedia = async (ad, cfg, opts = {}) => {
       creative?.effective_object_story_id
     ) {
       const fallback = await postMedia(creative, cfg, opts);
-      await resolveMediaUrls(fallback.media, accountId, cfg);
+      await resolveMediaUrls(fallback.media, accountId, cfg, urlOpts);
       if (fallback.media.some((m) => m.url)) {
         post = fallback;
         media = fallback.media;
       }
     }
+    // Films no token will give the address of still play in the preview
+    if (opts.preview_video_urls !== false && adId)
+      await previewVideoUrls(media, adId, cfg);
     // With addresses known, the picture the ad is known by can be told apart
     rankMedia(media, creative);
   }

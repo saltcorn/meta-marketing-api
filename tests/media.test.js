@@ -11,11 +11,16 @@ const serve = (routes) => {
   calls = [];
   fetch.mockImplementation(async (url, opts) => {
     calls.push({ url, auth: opts?.headers?.Authorization });
-    const hit = routes.find(([match]) => url.includes(match));
+    const auth = opts?.headers?.Authorization;
+    const hit = routes.find(([match]) =>
+      typeof match === "function" ? match(url, auth) : url.includes(match),
+    );
+    const reply = hit ? hit[1] : { error: { code: 100, message: `no route for ${url}` } };
     return {
       status: 200,
       headers: { get: () => null },
-      text: async () => JSON.stringify(hit ? hit[1] : { error: { code: 100, message: `no route for ${url}` } }),
+      // a page, such as a preview, comes back as it is
+      text: async () => (typeof reply === "string" ? reply : JSON.stringify(reply)),
     };
   });
 };
@@ -253,7 +258,9 @@ describe("a creative customised by placement", () => {
     ]);
     expect(res.media[0].placements).toContain("facebook:feed");
     expect(res.media[0].fallback).toBe(false);
+    expect(res.media[0].feed).toBe(true);
     expect(res.media[3].fallback).toBe(true);
+    expect(res.media[3].feed).toBe(false);
   });
 
   it("is the kind of what it shows, not of its catch-all", async () => {
@@ -282,7 +289,7 @@ describe("a creative customised by placement", () => {
     expect(res.error).toBeUndefined();
   });
 
-  it("without a feed rule, puts the picture the ad is known by first", async () => {
+  it("without a feed rule, puts the catch-all first, then the picture the ad is known by", async () => {
     serve([]);
     const creative = JSON.parse(JSON.stringify(placementAd.creative));
     const feed = creative.asset_feed_spec;
@@ -294,12 +301,135 @@ describe("a creative customised by placement", () => {
     const res = await getAdMedia({ ...placementAd, creative }, cfg, {
       resolve_urls: false,
     });
+    // the catch-all is what the feed shows now that no rule names the feed
     expect(res.media.map((m) => m.image_hash || m.video_id)).toEqual([
+      "777",
       "column",
       "story",
-      "777",
       "feed",
     ]);
+    expect(res.media[0].feed).toBe(true);
+  });
+});
+
+// Two films uploaded to the page: one for stories and reels, and a catch-all
+// which, with no rule naming the feed, is what the feed shows
+const pageVideoAd = (pageId) => ({
+  id: "50",
+  account_id: "9",
+  creative: {
+    id: "51",
+    object_type: "SHARE",
+    object_story_spec: { page_id: pageId },
+    asset_feed_spec: {
+      optimization_type: "PLACEMENT",
+      videos: [
+        { video_id: "801", thumbnail_url: "https://example.com/t/story_n.jpg?stp=s160", adlabels: label("L-story") },
+        { video_id: "802", thumbnail_url: "https://example.com/t/feed_n.jpg?stp=s160", adlabels: label("L-rest") },
+      ],
+      asset_customization_rules: [
+        {
+          customization_spec: {
+            publisher_platforms: ["facebook", "instagram"],
+            facebook_positions: ["story"],
+            instagram_positions: ["story", "reels"],
+          },
+          video_label: label("L-story")[0],
+          priority: 1,
+        },
+        { customization_spec: { age_min: 18 }, video_label: label("L-rest")[0], priority: 2 },
+      ],
+    },
+  },
+});
+
+const noPermission = { error: { code: 10, message: "(#10) Application does not have permission for this action" } };
+
+// A preview as Meta draws it: the film's still, and its files with escaped
+// addresses whose efg says what each file is
+const mp4 = (name, asset, tag) => {
+  const efg = Buffer.from(JSON.stringify({ vencode_tag: tag, xpv_asset_id: asset, duration_s: 52 })).toString("base64url");
+  return `https:\\/\\/video.fbcdn.net\\/v\\/${name}.mp4?efg=${efg}\\u0026oh=sig\\u0026oe=6AA`;
+};
+const previewHtml = (still, files) =>
+  `<html><img src="https://example.com/t/${still}_n.jpg"><script>{"videos":[${files.map((f) => `"${f}"`).join(",")}]}</script></html>`;
+const previewRoute = (format, name) => [
+  `ad_format=${format}`,
+  { data: [{ body: `<iframe src="https://www.facebook.com/ads/api/preview_iframe.php?d=${name}&amp;t=1"></iframe>` }] },
+];
+const SD = "xpv_progressive.FACEBOOK..C3.360.sve_sd";
+const HD = "xpv_progressive.FACEBOOK..C3.720.dash_h264-basic-gen2_720p";
+
+describe("films uploaded to the page", () => {
+  it("puts the catch-all first when it is what the feed shows", async () => {
+    serve([]);
+    const res = await getAdMedia(pageVideoAd("4000"), cfg, { resolve_urls: false });
+    expect(res.media.map((m) => m.video_id)).toEqual(["802", "801"]);
+    expect(res.media[0]).toMatchObject({ fallback: true, feed: true });
+    expect(res.media[1]).toMatchObject({ fallback: false, feed: false });
+    expect(res.type).toBe("video");
+  });
+
+  it("reads them with a token for the page", async () => {
+    const asPage = (match) => (url, auth) => url.includes(match) && auth === "Bearer PAGE4242";
+    serve([
+      ["/4242?", { access_token: "PAGE4242" }],
+      [asPage("/801?"), { id: "801", source: "https://video.fb/story.mp4" }],
+      [asPage("/802?"), { id: "802", source: "https://video.fb/feed.mp4" }],
+      ["/80", noPermission],
+    ]);
+    const res = await getAdMedia(pageVideoAd("4242"), cfg);
+    expect(res.media.map((m) => m.url)).toEqual(["https://video.fb/feed.mp4", "https://video.fb/story.mp4"]);
+    expect(res.error).toBeUndefined();
+    expect(calls.some((c) => c.url.includes("/previews"))).toBe(false);
+  });
+
+  it("finds them in the preview when no token will give them out", async () => {
+    serve([
+      ["/4343?", { error: { code: 190, message: "no page access" } }],
+      ["/80", noPermission],
+      previewRoute("MOBILE_FEED_STANDARD", "feed"),
+      previewRoute("FACEBOOK_STORY_MOBILE", "story"),
+      ["preview_iframe.php?d=feed", previewHtml("feed", [mp4("sd", 7, SD), mp4("hd", 7, HD)])],
+      ["preview_iframe.php?d=story", previewHtml("story", [mp4("story", 8, HD)])],
+    ]);
+    const res = await getAdMedia(pageVideoAd("4343"), cfg);
+    const [feed, story] = res.media;
+    expect(feed.url).toMatch(/^https:\/\/video\.fbcdn\.net\/v\/hd\.mp4\?efg=.*&oh=sig&oe=6AA$/);
+    expect(feed).toMatchObject({ url_from: "preview", preview_format: "MOBILE_FEED_STANDARD", length: 52 });
+    expect(feed.error).toBeUndefined();
+    expect(story.url).toContain("/story.mp4");
+    expect(story.preview_format).toBe("FACEBOOK_STORY_MOBILE");
+    expect(res.error).toBeUndefined();
+    // the preview page is not sent the access token
+    expect(calls.find((c) => c.url.includes("preview_iframe")).auth).toBeUndefined();
+  });
+
+  it("does not take a film from a preview that shows another one", async () => {
+    serve([
+      ["/4343?", { error: { code: 190, message: "no page access" } }],
+      ["/80", noPermission],
+      previewRoute("MOBILE_FEED_STANDARD", "feed"),
+      ["ad_format=", { data: [{ body: `<iframe src="https://www.facebook.com/ads/api/preview_iframe.php?d=other&amp;t=1"></iframe>` }] }],
+      ["preview_iframe.php?d=feed", previewHtml("feed", [mp4("hd", 7, HD)])],
+      ["preview_iframe.php?d=other", previewHtml("feed", [mp4("hd", 7, HD)])],
+    ]);
+    const res = await getAdMedia(pageVideoAd("4343"), cfg);
+    expect(res.media[0].url).toContain("/hd.mp4");
+    expect(res.media[1].url).toBeUndefined();
+    expect(res.media[1].error).toMatch(/pages_read_engagement/);
+    expect(res.error).toMatch(/1 of 2 could not be reached/);
+  });
+
+  it("leaves the preview alone when asked to", async () => {
+    serve([
+      ["/4343?", { error: { code: 190, message: "no page access" } }],
+      ["/80", noPermission],
+    ]);
+    const res = await getAdMedia(pageVideoAd("4343"), cfg, { preview_video_urls: false });
+    expect(res.media.every((m) => !m.url)).toBe(true);
+    expect(res.media[0].error).toMatch(/page 4343.*pages_read_engagement/);
+    expect(calls.some((c) => c.url.includes("/previews"))).toBe(false);
   });
 });
 

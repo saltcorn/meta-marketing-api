@@ -423,7 +423,7 @@ module.exports = {
       },
       isAsync: true,
       description:
-        "Get what an ad is made of and where to download it: { type, carousel, media }, where type is image, video, mixed or unknown and each entry in media has a url. Takes an ad id or an ad row that already has its creative. Set resolve_urls false in the options to only work out the type, without reading the address of every file.",
+        "Get what an ad is made of and where to download it: { type, carousel, media }, where type is image, video, mixed or unknown and each entry in media has a url. Takes an ad id or an ad row that already has its creative. Set resolve_urls false in the options to only work out the type, without reading the address of every file. A film whose address Meta will not give out is looked for in the ad's preview; set preview_video_urls false to skip that.",
       arguments: [
         { name: "ad", type: "String" },
         { name: "opts", type: "JSON" },

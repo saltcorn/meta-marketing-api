@@ -226,8 +226,9 @@ gives you
   creative does, or a carousel with both in it. `unknown` means there is no
   picture or film to be found, as on a text only ad. For an ad that shows a
   different picture or film per placement, the leftover catch-all (see
-  below) does not count, so an ad that shows pictures everywhere that
-  matters is an `image` ad even if a film fills in somewhere.
+  below) does not count unless it is what the feed shows, so an ad that
+  shows pictures everywhere that matters is an `image` ad even if a film
+  fills in somewhere.
 - **carousel** says whether the ad holds more than one card. The cards are
   the entries in `media`, in the order they are shown.
 - **media** has one entry per picture or film, each with a `url` you can
@@ -242,19 +243,23 @@ In Ads Manager you can give an ad a different picture or film for, say, the
 feed, stories and the right column. For these ads `media` comes most
 important first, so the first entry is the one to look at:
 
-1. what the Facebook feed or the Instagram feed shows
+1. what the Facebook feed or the Instagram feed shows. When the ad has no
+   choice of its own for the feed, that is the catch-all.
 2. otherwise the picture the ad is known by in Ads Manager
 3. what the other placements show
-4. the catch-all, used only in placements none of the others cover
+4. the catch-all, when it is only used in placements none of the others
+   cover
 5. anything the ad holds but no placement uses
 
 Each entry of such an ad also has:
 
 - **placements**, where it is shown, for example `facebook:feed`,
   `instagram:story` or `facebook` for every position on Facebook
-- **fallback**, which is `true` for the catch-all. A catch-all that cannot be
-  downloaded keeps its own `error`, but it does not appear in the ad's
-  `error` when what the ad shows can be downloaded.
+- **feed**, which is `true` for what the feed shows
+- **fallback**, which is `true` for the catch-all. A catch-all that is not
+  shown in the feed and cannot be downloaded keeps its own `error`, but it
+  does not appear in the ad's `error` when what the ad shows can be
+  downloaded.
 - **thumbnail_url** is a picture of the ad as it appears. It is there even
   when nothing else is, so it is worth keeping as a fallback: for a film it
   is a still rather than the film itself, which is why it is not in `media`.
@@ -303,11 +308,20 @@ even when the post itself cannot be read.
 A few things are worth knowing before you download:
 
 - **Video addresses are signed and short lived.** Fetch the file as soon as
-  you have the address rather than storing the address for later. Meta only
-  gives the address out to a token that owns the video: with a read only
-  token you may get the video's id and its thumbnail but no `url`, and the
-  entry then carries an `error` saying why. `permalink_url` is a stable
-  address for watching it, not for downloading it.
+  you have the address rather than storing the address for later.
+  `permalink_url` is a stable address for watching it, not for downloading
+  it.
+- **Films are often uploaded to the page rather than to the ad account.**
+  Meta only gives out the address of such a film to a token for that page,
+  so `get_meta_ad_media` asks for one by itself, which works when the access
+  token has a say over the page (see above). When it has not, the film is
+  looked for in the ad's preview, the same one you see in Ads Manager, and
+  the largest whole file there is taken. Such an entry says
+  `url_from: "preview"`. The preview is not an official part of the Meta
+  API and may change, and each film found this way costs two extra reads.
+  To leave the preview alone, pass the options
+  `{ preview_video_urls: false }`. A film that cannot be found either way has
+  its id and its thumbnail but no `url`, and an `error` saying why.
 - **Working out the type is cheaper than finding the addresses.** Every film
   costs one extra read to look up. If all you want is image against video,
   use `get_meta_ad_media_type`, or pass the options `{ resolve_urls: false }`.
