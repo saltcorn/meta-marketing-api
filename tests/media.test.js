@@ -186,6 +186,123 @@ describe("what counts as a carousel", () => {
   });
 });
 
+// A creative that shows a different asset per placement, with a film left
+// over as the catch-all for placements the other rules do not take
+const label = (id) => [{ id, name: `placement_asset_${id}` }];
+const placementAd = {
+  id: "1",
+  account_id: "9",
+  creative: {
+    id: "2",
+    object_type: "SHARE",
+    thumbnail_url: "https://example.com/v/feed_n.jpg?stp=p64x64",
+    asset_feed_spec: {
+      optimization_type: "PLACEMENT",
+      images: [
+        { hash: "feed", adlabels: label("L-feed") },
+        { hash: "story", adlabels: label("L-story") },
+        { hash: "column", adlabels: label("L-column") },
+      ],
+      videos: [{ video_id: "777", adlabels: label("L-video") }],
+      asset_customization_rules: [
+        {
+          customization_spec: {
+            publisher_platforms: ["facebook", "instagram"],
+            facebook_positions: ["story", "facebook_reels"],
+            instagram_positions: ["story", "reels"],
+          },
+          image_label: label("L-story")[0],
+          priority: 1,
+        },
+        {
+          customization_spec: {
+            publisher_platforms: ["facebook", "instagram"],
+            facebook_positions: ["feed", "marketplace"],
+            instagram_positions: ["stream"],
+          },
+          image_label: label("L-feed")[0],
+          priority: 2,
+        },
+        {
+          customization_spec: {
+            publisher_platforms: ["facebook"],
+            facebook_positions: ["right_hand_column", "search"],
+          },
+          image_label: label("L-column")[0],
+          priority: 3,
+        },
+        {
+          customization_spec: { age_min: 18, age_max: 65 },
+          video_label: label("L-video")[0],
+          priority: 4,
+        },
+      ],
+    },
+  },
+};
+
+describe("a creative customised by placement", () => {
+  it("puts what the feed shows first and the catch-all last", async () => {
+    serve([]);
+    const res = await getAdMedia(placementAd, cfg, { resolve_urls: false });
+    expect(res.media.map((m) => m.image_hash || m.video_id)).toEqual([
+      "feed",
+      "story",
+      "column",
+      "777",
+    ]);
+    expect(res.media[0].placements).toContain("facebook:feed");
+    expect(res.media[0].fallback).toBe(false);
+    expect(res.media[3].fallback).toBe(true);
+  });
+
+  it("is the kind of what it shows, not of its catch-all", async () => {
+    serve([]);
+    const res = await getAdMedia(placementAd, cfg, { resolve_urls: false });
+    expect(res.type).toBe("image");
+    expect(res.carousel).toBe(false);
+  });
+
+  it("does not report a catch-all that cannot be reached", async () => {
+    serve([
+      ["/777", { error: { code: 10, message: "(#10) Application does not have permission for this action" } }],
+      [
+        "/act_9/adimages",
+        {
+          data: ["feed", "story", "column"].map((h) => ({
+            hash: h,
+            url: `https://example.com/v/${h}_n.jpg`,
+          })),
+        },
+      ],
+    ]);
+    const res = await getAdMedia(placementAd, cfg);
+    expect(res.media[0].url).toBe("https://example.com/v/feed_n.jpg");
+    expect(res.media[3].error).toMatch(/permission/);
+    expect(res.error).toBeUndefined();
+  });
+
+  it("without a feed rule, puts the picture the ad is known by first", async () => {
+    serve([]);
+    const creative = JSON.parse(JSON.stringify(placementAd.creative));
+    const feed = creative.asset_feed_spec;
+    feed.images.forEach((i) => (i.url = `https://example.com/v/${i.hash}_n.jpg`));
+    feed.asset_customization_rules = feed.asset_customization_rules.filter(
+      (r) => r.priority !== 2,
+    );
+    creative.thumbnail_url = "https://example.com/other/column_n.jpg?stp=p64x64";
+    const res = await getAdMedia({ ...placementAd, creative }, cfg, {
+      resolve_urls: false,
+    });
+    expect(res.media.map((m) => m.image_hash || m.video_id)).toEqual([
+      "column",
+      "story",
+      "777",
+      "feed",
+    ]);
+  });
+});
+
 describe("the wording of an ad that boosts a post", () => {
   it("reads the post with a token for the page", async () => {
     serve([

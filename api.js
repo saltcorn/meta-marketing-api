@@ -648,6 +648,81 @@ const linkMedia = (data) =>
         link: data.link,
       };
 
+// Where an ad is mostly seen. A platform on its own means every position on it.
+const MAIN_PLACEMENTS = ["facebook:feed", "instagram:stream", "facebook", "instagram"];
+
+// The best rule priority of each piece of media on a creative that picks its
+// media by placement, kept here rather than in what the caller gets back
+const placementPriority = new WeakMap();
+
+/**
+ * Where a placement rule shows its asset, as platform:position, or the
+ * platform alone when the rule takes every position on it. A rule that names
+ * nothing is the catch-all for whatever the other rules leave over.
+ */
+const rulePlacements = (spec = {}) => {
+  const platforms = spec.publisher_platforms?.length
+    ? spec.publisher_platforms
+    : Object.keys(spec)
+        .filter((k) => k.endsWith("_positions"))
+        .map((k) => k.replace(/_positions$/, ""));
+  return platforms.flatMap((p) => {
+    const positions = spec[`${p}_positions`] || [];
+    return positions.length ? positions.map((pos) => `${p}:${pos}`) : [p];
+  });
+};
+
+/**
+ * Which placements the rules of a creative give one of its assets to, found
+ * through the labels the rules and the asset share. fallback says the asset
+ * is only there for the placements no other rule takes.
+ */
+const placementInfo = (asset, rules) => {
+  const labels = asset?.adlabels || [];
+  const used = rules.filter((r) =>
+    [r.image_label, r.video_label].some(
+      (l) => l && labels.some((a) => (l.id && a.id === l.id) || (l.name && a.name === l.name)),
+    ),
+  );
+  if (!used.length) return {};
+  const perRule = used.map((r) => rulePlacements(r.customization_spec));
+  return {
+    placements: [...new Set(perRule.flat())],
+    fallback: perRule.every((p) => !p.length),
+    priority: Math.min(...used.map((r) => r.priority ?? Number.MAX_SAFE_INTEGER)),
+  };
+};
+
+const fileName = (url) => {
+  try {
+    return new URL(url).pathname.split("/").pop();
+  } catch (e) {
+    return "";
+  }
+};
+
+/**
+ * Put the media of a creative that picks its media by placement in order of
+ * how much of the ad it is: what the feed shows, then the picture the ad is
+ * known by, then what other placements show in the order Meta checks its
+ * rules, then the catch-all, then anything no rule uses. Every other creative
+ * keeps the order its media is shown in.
+ */
+const rankMedia = (media, creative) => {
+  if (!media.some((m) => m.placements)) return media;
+  const thumb = fileName(creative?.thumbnail_url);
+  const rank = (m) => {
+    if (!m.placements) return 4;
+    if (m.fallback) return 3;
+    if (m.placements.some((p) => MAIN_PLACEMENTS.includes(p))) return 0;
+    if (thumb && [m.url, m.thumbnail_url].some((u) => u && fileName(u) === thumb))
+      return 1;
+    return 2;
+  };
+  const priority = (m) => placementPriority.get(m) ?? Number.MAX_SAFE_INTEGER;
+  return media.sort((a, b) => rank(a) - rank(b) || priority(a) - priority(b));
+};
+
 /**
  * Every piece of media on a creative, without reading anything further. A
  * video carries its own still as a thumbnail rather than as a picture of its
@@ -680,9 +755,19 @@ const creativeMedia = (creative) => {
   });
 
   // Flexible and dynamic creatives keep a pool of assets for Meta to choose
-  // between, rather than one story
+  // between, rather than one story. A creative customised by placement has
+  // rules saying which asset each placement shows.
+  const rules = feed.asset_customization_rules || [];
+  const addAsset = (asset, m) => {
+    if (rules.length) {
+      const { priority, ...info } = placementInfo(asset, rules);
+      Object.assign(m, info);
+      if (priority !== undefined) placementPriority.set(m, priority);
+    }
+    addMedia(out, m);
+  };
   (feed.videos || []).forEach((v) =>
-    addMedia(out, {
+    addAsset(v, {
       kind: "video",
       video_id: v.video_id,
       thumbnail_url: v.thumbnail_url,
@@ -690,7 +775,7 @@ const creativeMedia = (creative) => {
     }),
   );
   (feed.images || []).forEach((i) =>
-    addMedia(out, { kind: "image", url: i.url, image_hash: i.hash }),
+    addAsset(i, { kind: "image", url: i.url, image_hash: i.hash }),
   );
 
   // Last, what the creative says about itself. On many ads this is the same
@@ -708,7 +793,7 @@ const creativeMedia = (creative) => {
       image_hash: creative.image_hash,
     });
 
-  return out;
+  return rankMedia(out, creative);
 };
 
 /**
@@ -886,7 +971,12 @@ const resolveMediaUrls = async (media, accountId, cfg) => {
  * said once rather than once per picture.
  */
 const mediaErrors = (media) => {
-  const stuck = media.filter((m) => m.error && !m.url);
+  // A catch-all that cannot be reached does not matter while what the ad
+  // shows can be
+  const shownReached = media.some((m) => m.url && !m.fallback);
+  const stuck = media.filter(
+    (m) => m.error && !m.url && !(m.fallback && shownReached),
+  );
   if (!stuck.length) return undefined;
   const reasons = [...new Set(stuck.map((m) => m.error))];
   return `${stuck.length} of ${media.length} could not be reached: ${reasons.join(
@@ -896,8 +986,12 @@ const mediaErrors = (media) => {
 
 /** What kind of ad this is, from the media it was built on */
 const mediaType = (media) => {
-  const hasVideo = media.some((m) => m.kind === "video");
-  const hasImage = media.some((m) => m.kind === "image");
+  // The catch-all of a creative customised by placement only fills the
+  // placements its other rules leave over, which is not what the ad is
+  const shown = media.filter((m) => !m.fallback);
+  const pool = shown.length ? shown : media;
+  const hasVideo = pool.some((m) => m.kind === "video");
+  const hasImage = pool.some((m) => m.kind === "image");
   if (hasVideo && hasImage) return "mixed";
   if (hasVideo) return "video";
   if (hasImage) return "image";
@@ -982,6 +1076,8 @@ const getAdMedia = async (ad, cfg, opts = {}) => {
         media = fallback.media;
       }
     }
+    // With addresses known, the picture the ad is known by can be told apart
+    rankMedia(media, creative);
   }
 
   const children =
