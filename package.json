@@ -1,6 +1,6 @@
 {
   "name": "@saltcorn/meta-marketing-api",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Read ads on Facebook and Instagram with the Meta Marketing API",
   "main": "index.js",
   "dependencies": {
